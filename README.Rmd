@@ -1,0 +1,468 @@
+---
+title: "Disney+ Streamming Twitter Announcement Analysis"
+author: "Eric Leung"
+date: 2019-10-22
+output:
+    md_document:
+        toc: true
+        df_print: "kable"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, collapse = TRUE)
+```
+
+# Overview
+
+Disney recently announced its new streaming service
+[Disney+](https://twitter.com/disneyplus). On Twitter, their account tweeted out
+a very long list of movies and TV series that they planned on releasing.
+
+<blockquote class="twitter-tweet"><p lang="en" dir="ltr">It. Is. Time. From Snow White and the Seven Dwarfs to The Mandalorian, check out basically everything coming to <a href="https://twitter.com/hashtag/DisneyPlus?src=hash&amp;ref_src=twsrc%5Etfw">#DisneyPlus</a> in the U.S. on November 12.<br><br>Pre-order in the U.S. at <a href="https://t.co/wJig4STf4P">https://t.co/wJig4STf4P</a> today: <a href="https://t.co/tlWvp23gLF">https://t.co/tlWvp23gLF</a> <a href="https://t.co/0q3PTuaDWT">pic.twitter.com/0q3PTuaDWT</a></p>&mdash; Disney+ (@disneyplus) <a href="https://twitter.com/disneyplus/status/1183715553057239040?ref_src=twsrc%5Etfw">October 14, 2019</a></blockquote> 
+
+
+My inner child was now curious as to which movies and TV series were most
+popular, as "voted" by the twitterverse. And here we are.
+
+**Last updated:** `r Sys.Date()`
+
+
+# Setup
+
+```{r load_packages, message=FALSE, warning=FALSE}
+# Setup environment
+library(tidyverse)
+library(lubridate)
+library(ggrepel)
+library(ggthemes)
+library(rtweet)
+```
+
+
+# Query data
+
+```{r query_tweets, eval=FALSE}
+# Get recent tweets
+# Note, this is the original tweet with a number of thread replies 2019-10-14
+# https://twitter.com/disneyplus/status/1183715553057239040
+rt <- get_timeline("disneyplus", n = 1000)
+saveRDS(rt, "disneyplus_search.rds")
+saveRDS(rt$status_id, "disneyplus_search-ids.rds")
+```
+
+But instead, here I'll just look up the status IDs.
+
+```{r read_in_data}
+ids_file <- "disneyplus_search-ids.rds"
+disneyplus_file <- "disneyplus_search.rds"
+
+# Read in search directly if exists
+if (file.exists(disneyplus_file)) {
+  rt <- readRDS(disneyplus_file)
+} else {
+  # Download status IDs file
+  download.file(
+    "https://github.com/erictleung/disneyplus-twitter-analysis/blob/master/data/disneyplus_search-ids.rds?raw=true",
+    ids_file
+  )
+  # Read status IDs from downloaded file
+  ids <- readRDS(ids_file)
+
+  # Lookup data associated with status ids
+  rt <- rtweet::lookup_tweets(ids)
+}
+```
+
+
+# Process and clean data
+
+Things to do:
+
+- Select number of likes and number of retweets
+- Focus on just the movies after the initial announcement
+- Extract the movie name and the year of the announcement
+
+```{r clean_data}
+rt_clean <-
+    rt %>%
+
+    # Create subset of useful columns
+    select(created_at,
+           text,
+           favorite_count,
+           retweet_count) %>%
+
+    # Focus on tweets after the annoucement
+    filter(created_at > ymd_hms("2019-10-14 12:05:54")) %>%
+
+    # Extract movie name
+    mutate(movie_name = str_match(text, "\\b.* \\(")) %>%
+    mutate(movie_name = str_remove(movie_name, " \\($")) %>%
+
+    # Fix some odd characters
+    mutate(movie_name = str_replace(movie_name, "&amp;", "&")) %>%
+
+    # Extract movie year, being four numbers between parentheses
+    mutate(movie_year = str_match(text, "\\([0-9]{4}\\)")) %>%
+    mutate(movie_year = str_match(movie_year, "[0-9]{4}")) %>%
+
+    # Identify decade of movie
+    # Modified from: https://stackoverflow.com/a/48966643/
+    mutate(movie_year = as.integer(movie_year)) %>%
+    mutate(movie_decade = movie_year - movie_year %% 10) %>%
+    mutate(movie_decade = as.factor(movie_decade)) %>%
+
+    # Ratio betwen retweet counts and favorites
+    mutate(ratio_like_to_rt = favorite_count / retweet_count) %>%
+
+    # We can remove the original text, as we've extracted the useful info
+    select(-text) %>%
+
+    # Filter for rows that have movie name and year
+    filter(!is.na(movie_year) | !is.na(movie_name)) %>%
+
+    # Add row numbers for rank analyses
+    arrange(created_at) %>%
+    mutate(id = row_number()) %>%
+    select(id, everything())
+```
+
+
+# Basic statistics
+
+```{r}
+# Number of titles
+rt_clean %>% nrow()
+
+# Titles per decade
+rt_clean %>% select(movie_decade) %>% table()
+```
+
+
+# Plot rate over time
+
+```{r plot_rate_over_time, fig.height=6, fig.width=8}
+rt_clean %>%
+    ggplot(aes(x = created_at, y = id)) +
+    geom_point() +
+    geom_smooth(method = "loess", color = "grey", se = FALSE) +
+    ggtitle(label = "Disney+ movies and series by tweet order and time",
+            subtitle = "Fit by LOESS") +
+    xlab("Time tweeted") +
+    ylab("Tweet order") +
+    labs(caption = "\nSource: Data gathered via Twitter's standard `search/tweets` API using rtweet") +
+    theme_clean()
+```
+
+It appears that the Twitter account tweeted out in bursts and in regular intervals.
+
+
+# Plot likes versus retweets
+
+```{r plot_likes_vs_retweets, fig.height=8, fig.width=6}
+rt_clean %>%
+    ggplot(aes(x = favorite_count, y = retweet_count)) +
+    geom_point(alpha = 0.6) +
+    geom_vline(xintercept = 10000, color = "grey") +
+    geom_smooth(method = "loess", color = "grey", se = FALSE) +
+    geom_label_repel(data = subset(rt_clean, favorite_count > 10000), aes(label = movie_name)) +
+    ggtitle(label = "Disney+ movies and series by\ntweet favorite and retweet counts",
+            subtitle = "Labels shown for titles with >10k favorites and fit by LOESS") +
+    xlab("Favorite count") +
+    ylab("Retweet count") +
+    labs(caption = "\nSource: Data gathered via Twitter's standard `search/tweets` API using rtweet") +
+    theme_clean()
+```
+
+Let's facet this!
+
+```{r facet_plot_likes_vs_retweets, fig.height=6, fig.width=9}
+rt_clean %>%
+    ggplot(aes(x = favorite_count, y = retweet_count, color = movie_decade)) +
+    geom_point(alpha = 0.6) +
+    geom_smooth(method = "loess", color = "grey", se = FALSE) +
+    facet_wrap(~ movie_decade) +
+    ggtitle(label = "Disney+ movies and series by tweet favorite and retweet counts",
+            subtitle = "Trends fit by LOESS and facetted by decade series/movie was released") +
+    xlab("Favorite count") +
+    ylab("Retweet count") +
+    labs(caption = "\nSource: Data gathered via Twitter's standard `search/tweets` API using rtweet") +
+    theme_clean() +
+    theme(legend.position = "none")
+```
+
+
+# Timeline of release date with likes
+
+```{r timeline_of_release_likes, fig.height=8, fig.width=6}
+rt_clean %>%
+    ggplot(aes(x = movie_year, y = favorite_count)) +
+    geom_point(alpha = 0.6) +
+    geom_label_repel(data = subset(rt_clean, favorite_count > 10000), aes(label = movie_name)) +
+    ggtitle(label = "Disney+ movies and series by tweet favorite counts",
+            subtitle = "Labels shown for titles with >10k favorites") +
+    xlab("Movie or TV series release year") +
+    ylab("Favorite count") +
+    labs(caption = "\nSource: Data gathered via Twitter's standard `search/tweets` API using rtweet") +
+    theme_clean()
+```
+
+
+# Timeline of release date with retweets
+
+```{r timeline_of_release_retweets, fig.height=8, fig.width=6}
+rt_clean %>%
+    ggplot(aes(x = movie_year, y = retweet_count)) +
+    geom_point(alpha = 0.6) +
+    geom_label_repel(data = subset(rt_clean, retweet_count > 1500), aes(label = movie_name)) +
+    ggtitle(label = "Disney+ movies and series by tweet retweet counts",
+            subtitle = "Labels shown for titles with >1.5k retweets") +
+    xlab("Movie or TV series release year") +
+    ylab("Retweet count") +
+    labs(caption = "\nSource: Data gathered via Twitter's standard `search/tweets` API using rtweet") +
+    theme_clean()
+```
+
+
+# Timeline of release data with ratio between favorite and retweet count
+
+```{r timeline_of_release_ratio_like, fig.height=8, fig.width=6}
+rt_clean %>%
+    ggplot(aes(x = movie_year, y = ratio_like_to_rt, color = movie_decade)) +
+    geom_boxplot() +
+    geom_point(alpha = 0.3) +
+    ggtitle(label = "Disney+ movies and series by ratio likeness",
+            subtitle = "Ratio likeness is ratio of favorite count to retweet count") +
+    xlab("Movie or TV series release year") +
+    ylab("Ratio likeness") +
+    labs(caption = "\nSource: Data gathered via Twitter's standard `search/tweets` API using rtweet") +
+    theme_clean() +
+    theme(legend.position = "none")
+```
+
+
+# Plot of rank tweet and likes
+
+```{r plot_rank_tweet_likes, fig.height=8, fig.width=6}
+rt_clean %>%
+    ggplot(aes(x = id, y = favorite_count)) +
+    geom_point(alpha = 0.6) +
+    geom_label_repel(data = subset(rt_clean, favorite_count > 10000), aes(label = movie_name)) +
+    ggtitle(label = "Disney+ movies and series by tweet order and favorites",
+            subtitle = "Order sorted earliest to latest tweet time, labels with >10k likes") +
+    xlab("Tweet order") +
+    ylab("Favorite counts") +
+    labs(caption = "\nSource: Data gathered via Twitter's standard `search/tweets` API using rtweet") +
+    theme_clean()
+```
+
+
+# Plot of rank tweet and retweets
+
+```{r plot_rank_tweet_retweets, fig.height=8, fig.width=6}
+rt_clean %>%
+    ggplot(aes(x = id, y = retweet_count)) +
+    geom_point(alpha = 0.6) +
+    geom_label_repel(data = subset(rt_clean, retweet_count > 2000), aes(label = movie_name)) +
+    ggtitle(label = "Disney+ movies and series by tweet order and retweets",
+            subtitle = "Order sorted earliest to latest tweet time, labels with >5k retweets") +
+    xlab("Tweet order") +
+    ylab("Retweet counts") +
+    labs(caption = "\nSource: Data gathered via Twitter's standard `search/tweets` API using rtweet") +
+    theme_clean()
+```
+
+
+# What decade of movies are the most popular by likes?
+
+```{r plot_popular_by_decade, fig.height=6, fig.width=8}
+top_favorite_by_decade <-
+    rt_clean %>%
+    group_by(movie_decade) %>%
+    arrange(favorite_count) %>%
+    top_n(n = 1, wt = favorite_count) %>%
+    ungroup()
+
+rt_clean %>%
+    ggplot(aes(x = movie_year, y = favorite_count, color = movie_decade)) +
+    geom_boxplot() +
+    geom_point(alpha = 0.3) +
+    geom_label_repel(data = top_favorite_by_decade, aes(label = movie_name)) +
+    ggtitle(label = "Disney+ movies and series by decade and favorite count",
+            subtitle = "Color represents decade, labeled titles are top favorite for each decade") +
+    xlab("Movie or TV series release year") +
+    ylab("Favorite count") +
+    labs(caption = "\nSource: Data gathered via Twitter's standard `search/tweets` API using rtweet") +
+    theme_clean() +
+    theme(legend.position = "none")
+```
+
+```{r plot_less_liked_by_decade, fig.height=6, fig.width=8}
+bottom_favorite_by_decade <-
+    rt_clean %>%
+    group_by(movie_decade) %>%
+    arrange(desc(favorite_count)) %>%
+    top_n(n = -1, wt = favorite_count) %>%
+    ungroup()
+
+rt_clean %>%
+    ggplot(aes(x = movie_year, y = favorite_count, color = movie_decade)) +
+    geom_boxplot() +
+    geom_point(alpha = 0.3) +
+    scale_y_log10() +
+    geom_label_repel(data = bottom_favorite_by_decade, aes(label = movie_name)) +
+    ggtitle(label = "Disney+ movies and series by decade and favorite count",
+            subtitle = "Color represents decade, labeled titles are least favorite for each decade") +
+    xlab("Movie or TV series release year") +
+    ylab("Favorite count") +
+    labs(caption = "\nSource: Data gathered via Twitter's standard `search/tweets` API using rtweet") +
+    theme_clean() +
+    theme(legend.position = "none")
+```
+
+Both?
+
+```{r favorites_by_decade, fig.height=6, fig.width=8}
+favorites_by_decade <- dplyr::union(top_favorite_by_decade, bottom_favorite_by_decade)
+
+rt_clean %>%
+    ggplot(aes(x = movie_year, y = favorite_count, color = movie_decade)) +
+    geom_boxplot() +
+    geom_point(alpha = 0.3) +
+    coord_trans(y = "log10") +
+    geom_label_repel(data = favorites_by_decade, aes(label = movie_name)) +
+    ggtitle(label = "Disney+ movies and series by decade and favorite count",
+            subtitle = "Color = decade, labeled titles are most and least favorite per decade, y-axis log10 scaled") +
+    xlab("Movie or TV series release year") +
+    ylab("Favorite count") +
+    labs(caption = "\nSource: Data gathered via Twitter's standard `search/tweets` API using rtweet") +
+    theme_clean() +
+    theme(legend.position = "none")
+```
+
+
+# What decade of movies are the most popular by retweets?
+
+```{r plot_retweet_popular_by_decade, fig.height=6, fig.width=8}
+top_retweet_by_decade <-
+    rt_clean %>%
+    group_by(movie_decade) %>%
+    arrange(retweet_count) %>%
+    top_n(n = 1, wt = retweet_count) %>%
+    ungroup()
+
+rt_clean %>%
+    ggplot(aes(x = movie_year, y = retweet_count, color = movie_decade)) +
+    geom_boxplot() +
+    geom_point(alpha = 0.3) +
+    geom_label_repel(data = top_retweet_by_decade, aes(label = movie_name)) +
+    ggtitle(label = "Disney+ movies and series by decade and retweet count",
+            subtitle = "Color represents decade, labeled titles are top retweet for each decade") +
+    xlab("Movie or TV series release year") +
+    ylab("Retweet count") +
+    labs(caption = "\nSource: Data gathered via Twitter's standard `search/tweets` API using rtweet") +
+    theme_clean() +
+    theme(legend.position = "none")
+```
+
+```{r plot_retweet_less_liked_by_decade, fig.height=6, fig.width=8}
+bottom_retweet_by_decade <-
+    rt_clean %>%
+    group_by(movie_decade) %>%
+    arrange(retweet_count) %>%
+    top_n(n = -1, wt = retweet_count) %>%
+    ungroup()
+
+rt_clean %>%
+    ggplot(aes(x = movie_year, y = retweet_count, color = movie_decade)) +
+    geom_boxplot() +
+    geom_point(alpha = 0.3) +
+    scale_y_log10() +
+    geom_label_repel(data = bottom_retweet_by_decade, aes(label = movie_name)) +
+    ggtitle(label = "Disney+ movies and series by decade and retweet count",
+            subtitle = "Color represents decade, labeled titles are least retweeted for each decade") +
+    xlab("Movie or TV series release year") +
+    ylab("Retweet count") +
+    labs(caption = "\nSource: Data gathered via Twitter's standard `search/tweets` API using rtweet") +
+    theme_clean() +
+    theme(legend.position = "none")
+```
+
+Both?
+
+```{r retweets_by_decade, fig.height=6, fig.width=8}
+retweets_by_decade <- dplyr::union(top_retweet_by_decade, bottom_retweet_by_decade)
+
+rt_clean %>%
+    ggplot(aes(x = movie_year, y = retweet_count, color = movie_decade)) +
+    geom_boxplot() +
+    geom_point(alpha = 0.3) +
+    coord_trans(y = "log10") +
+    geom_label_repel(data = retweets_by_decade, aes(label = movie_name)) +
+    ggtitle(label = "Disney+ movies and series by decade and retweet count",
+            subtitle = "Color = decade, labeled titles are most and least retweet per decade, y-axis log10 scaled") +
+    xlab("Movie or TV series release year") +
+    ylab("Retweet count") +
+    labs(caption = "\nSource: Data gathered via Twitter's standard `search/tweets` API using rtweet") +
+    theme_clean() +
+    theme(legend.position = "none")
+```
+
+
+# Pixar movie popularity
+
+```{r pixar_movie_popularity, fig.height=6, fig.width=8}
+# Copied from https://en.wikipedia.org/wiki/List_of_Pixar_films
+pixar <- c(
+    "Toy Story",
+    "A Bug's Life",
+    "Toy Story 2",
+    "Monsters, Inc.",
+    "Finding Nemo",
+    "The Incredibles",
+    "Cars",
+    "Ratatouille",
+    "WALL•E",
+    "Up",
+    "Toy Story 3",
+    "Cars 2",
+    "Brave",
+    "Monsters University",
+    "Inside Out",
+    "The Good Dinosaur",
+    "Finding Dory",
+    "Cars 3",
+    "Coco",
+    "Incredibles 2",
+    "Toy Story 4"
+)
+
+rt_clean %>%
+    filter(movie_name %in% pixar) %>%
+    ggplot(aes(x = favorite_count, y = retweet_count, color = movie_decade, label = movie_name)) +
+    geom_point() +
+    geom_smooth(method = "loess", color = "grey", se = FALSE) +
+    geom_label_repel() +
+    ggtitle(label = "Pixar movies announced to stream on Disney+\nby tweet favorite and retweet counts",
+            subtitle = "Points labeled by movie decade, fit by LOESS") +
+    xlab("Favorite count") +
+    ylab("Retweet count") +
+    labs(caption = "\nSource: Data gathered via Twitter's standard `search/tweets` API using rtweet") +
+    theme_clean() +
+    scale_color_discrete(name = "Decade") +
+    theme(legend.position = "bottom")
+```
+
+It appears the following movies weren't in the main list of announcements:
+
+- Up
+- Coco
+- Incredibles 2
+- Toy Story 4
+
+
+# Session information
+
+```{r}
+sessionInfo()
+```
